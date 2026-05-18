@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 بوت روليت سياف - الإصدار المتكامل مع ويب هوك ونظام الإبقاء على النشاط
-ملف التشغيل الرئيسي
 """
 
 import os
@@ -119,6 +118,7 @@ class Database:
 
     async def _init_db(self):
         async with self.pool.acquire() as conn:
+            # جداول أساسية
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_channels (
                     id SERIAL PRIMARY KEY,
@@ -126,6 +126,8 @@ class Database:
                     channel_username TEXT NOT NULL UNIQUE
                 );
             """)
+            
+            # إعادة إنشاء جدول condition_channels مع العمود is_default
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS condition_channels (
                     id SERIAL PRIMARY KEY,
@@ -133,6 +135,18 @@ class Database:
                     is_default BOOLEAN DEFAULT FALSE
                 );
             """)
+            
+            # التحقق من وجود العمود is_default وإضافته إذا لم يكن موجوداً
+            await conn.execute("""
+                DO $$ 
+                BEGIN 
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='condition_channels' AND column_name='is_default') THEN
+                        ALTER TABLE condition_channels ADD COLUMN is_default BOOLEAN DEFAULT FALSE;
+                    END IF;
+                END $$;
+            """)
+            
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS roulettes (
                     id SERIAL PRIMARY KEY,
@@ -177,17 +191,23 @@ class Database:
                     notifications_enabled BOOLEAN DEFAULT TRUE
                 );
             """)
+            
+            # إدراج القناة الافتراضية
             await conn.execute("""
                 INSERT INTO condition_channels (channel_username, is_default)
                 VALUES ($1, TRUE)
-                ON CONFLICT (channel_username) DO NOTHING
+                ON CONFLICT (channel_username) DO UPDATE SET is_default = TRUE
             """, DEFAULT_CONDITION_CHANNEL)
+            
+            # إعدادات افتراضية
             await conn.execute("""
                 INSERT INTO bot_settings (key, value)
                 VALUES ('status', 'running'),
                        ('notifications_enabled', 'true')
                 ON CONFLICT (key) DO NOTHING
             """)
+            
+            logger.info("تم تهيئة قاعدة البيانات بنجاح")
 
     async def _execute(self, query: str, *params):
         async with self.pool.acquire() as conn:
@@ -208,7 +228,7 @@ class Database:
     async def add_user_channel(self, user_id: int, channel: str) -> bool:
         try:
             await self._execute(
-                "INSERT INTO user_channels (user_id, channel_username) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO user_channels (user_id, channel_username) VALUES ($1, $2) ON CONFLICT (channel_username) DO NOTHING",
                 user_id, channel,
             )
             return True
@@ -225,11 +245,12 @@ class Database:
     async def add_condition_channel(self, channel: str, is_default: bool = False) -> bool:
         try:
             await self._execute(
-                "INSERT INTO condition_channels (channel_username, is_default) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO condition_channels (channel_username, is_default) VALUES ($1, $2) ON CONFLICT (channel_username) DO UPDATE SET is_default = $2",
                 channel, is_default,
             )
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"خطأ في إضافة قناة شرط: {e}")
             return False
 
     async def remove_condition_channel(self, channel_id: int) -> bool:
@@ -287,7 +308,7 @@ class Database:
 
     async def add_participant(self, roulette_id: int, user_id: int) -> bool:
         try:
-            await self._execute("INSERT INTO participants (roulette_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", roulette_id, user_id)
+            await self._execute("INSERT INTO participants (roulette_id, user_id) VALUES ($1,$2) ON CONFLICT (roulette_id, user_id) DO NOTHING", roulette_id, user_id)
             return True
         except Exception:
             return False
@@ -430,9 +451,9 @@ async def edit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_caption_and_buttons(query, caption: str, reply_markup: InlineKeyboardMarkup):
     try:
-        await query.edit_message_caption(caption=caption, reply_markup=reply_markup, parse_mode="HTML")
-    except TelegramError:
-        pass
+        await query.edit_message_caption(caption=wrap_text(caption), reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramError as e:
+        logger.error(f"خطأ في تعديل الكابتشن: {e}")
 
 
 async def verify_bot_admin(context, channel_username: str) -> bool:
@@ -532,6 +553,14 @@ async def perform_draw(roulette_id: int, chat_id: int, message_id: int, context:
             await send_notification(context, owner_id, f"حدث خطأ أثناء حفظ نتيجة السحب: {db_error}")
     except Exception as e:
         logger.error(f"استثناء غير متوقع أثناء السحب {roulette_id}: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=wrap_text("حدث خطأ غير متوقع أثناء السحب. يرجى التواصل مع المشرف."),
+                parse_mode="HTML",
+            )
+        except:
+            pass
 
 
 # ---------- أوامر البوت ----------
@@ -540,16 +569,16 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(wrap_text("غير مصرح لك."), parse_mode="HTML")
         return
     keyboard = [
-        [InlineKeyboardButton("إدارة المستخدمين", callback_data="admin_users")],
-        [InlineKeyboardButton("إدارة القنوات", callback_data="admin_channels")],
-        [InlineKeyboardButton("قنوات الاشتراك الإجباري", callback_data="admin_conditions")],
-        [InlineKeyboardButton("إعدادات الإشعارات العامة", callback_data="admin_notifications")],
-        [InlineKeyboardButton("تشغيل البوت" if await db.get_bot_status() == "maintenance" else "إيقاف تشغيل البوت",
+        [InlineKeyboardButton("ادارة المستخدمين", callback_data="admin_users")],
+        [InlineKeyboardButton("ادارة القنوات", callback_data="admin_channels")],
+        [InlineKeyboardButton("قنوات الاشتراك الاجباري", callback_data="admin_conditions")],
+        [InlineKeyboardButton("اعدادات الاشعارات العامة", callback_data="admin_notifications")],
+        [InlineKeyboardButton("تشغيل البوت" if await db.get_bot_status() == "maintenance" else "ايقاف تشغيل البوت",
                               callback_data="toggle_bot_status")],
         [InlineKeyboardButton("رجوع", callback_data="main_menu")],
     ]
     await update.message.reply_text(
-        text=wrap_text("لوحة تحكم الأدمن"),
+        text=wrap_text("لوحة تحكم الادمن"),
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
@@ -558,7 +587,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(
         photo=MAIN_PHOTO_URL,
-        caption=wrap_text("القائمة الرئيسية لبوت روليت سياف"),
+        caption=wrap_text("مرحبا بك في بوت روليت سياف\n\nاختر من القائمة ادناه:"),
         reply_markup=build_main_menu_keyboard(),
         parse_mode="HTML",
     )
@@ -573,7 +602,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID:
         status = await db.get_bot_status()
         if status == "maintenance" and data != "none":
-            await query.answer("البوت قيد الصيانة حالياً، يرجى المحاولة لاحقاً", show_alert=True)
+            await query.answer("البوت قيد الصيانة حاليا، يرجى المحاولة لاحقا", show_alert=True)
             return
         if await db.is_user_banned(user_id):
             await query.answer("لقد تم حظرك من استخدام البوت.", show_alert=True)
@@ -583,51 +612,180 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    # معالجة الأزرار المختلفة (تم اختصارها للحفاظ على المساحة)
-    # الكود الكامل موجود في الملف السابق
-    
-    await query.answer("جاري التطوير...", show_alert=True)
+    # القائمة الرئيسية
+    if data == "main_menu":
+        await edit_to_main_menu(update, context)
+        return
+
+    # لوحة الادمن
+    if data == "admin_users":
+        await query.answer()
+        keyboard = [
+            [InlineKeyboardButton("حظر مستخدم", callback_data="ban_user")],
+            [InlineKeyboardButton("الغاء حظر مستخدم", callback_data="unban_user")],
+            [InlineKeyboardButton("رجوع", callback_data="admin_back")],
+        ]
+        await edit_caption_and_buttons(query, "ادارة المستخدمين", InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "admin_back":
+        await admin_command(update, context)
+        return
+
+    elif data == "toggle_bot_status":
+        current = await db.get_bot_status()
+        new_status = "maintenance" if current == "running" else "running"
+        await db.set_bot_status(new_status)
+        await query.answer(f"تم تغيير حالة البوت الى: {new_status}", show_alert=True)
+        await admin_command(update, context)
+        return
+
+    # معالجة بسيطة للخيارات الاخرى
+    elif data == "my_channels":
+        channels = await db.get_user_channels(user_id)
+        if not channels:
+            text = "لا توجد قنوات مضافة"
+        else:
+            text = "قنواتك:\n" + "\n".join(f"- {ch}" for ch in channels)
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="main_menu")]]
+        await edit_caption_and_buttons(query, text, InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "condition_channels":
+        channels = await db.get_condition_channels()
+        if not channels:
+            text = "لا توجد قنوات اشتراك اجباري"
+        else:
+            text = "قنوات الاشتراك الاجباري:\n" + "\n".join(f"- {ch}" for ch in channels)
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="main_menu")]]
+        await edit_caption_and_buttons(query, text, InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "control_panel":
+        notif_status = await db.get_user_notifications_enabled(user_id)
+        notif_btn_text = "الاشعارات مفعلة" if notif_status else "الاشعارات معطلة"
+        keyboard = [
+            [InlineKeyboardButton("مسابقاتي", callback_data="my_contests")],
+            [InlineKeyboardButton("مسابقات نشطة حاليا", callback_data="active_contests")],
+            [InlineKeyboardButton(notif_btn_text, callback_data="toggle_user_notifications")],
+            [InlineKeyboardButton("رجوع", callback_data="main_menu")],
+        ]
+        await edit_caption_and_buttons(query, "لوحة التحكم", InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "toggle_user_notifications":
+        current = await db.get_user_notifications_enabled(user_id)
+        await db.set_user_notifications(user_id, not current)
+        await query.answer(f"تم {'تعطيل' if current else 'تفعيل'} الاشعارات", show_alert=True)
+        # اعادة عرض لوحة التحكم
+        fake_update = update
+        fake_update.callback_query.data = "control_panel"
+        await button_handler(fake_update, context)
+        return
+
+    elif data == "my_contests":
+        grouped = await db.get_grouped_user_contests(user_id)
+        if not grouped:
+            text = "لا توجد مسابقات نشطة"
+        else:
+            text = "مسابقاتك النشطة:\n"
+            for desc, items in grouped.items():
+                text += f"\n- {desc}: {len(items)} قناة"
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="control_panel")]]
+        await edit_caption_and_buttons(query, text, InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "active_contests":
+        channels = await db.get_all_active_channels()
+        if not channels:
+            text = "لا توجد مسابقات نشطة"
+        else:
+            text = "القنوات التي بها مسابقات نشطة:\n"
+            for ch, cid, mid in channels:
+                cid_str = str(cid)[4:] if str(cid).startswith("-100") else str(cid)
+                link = f"https://t.me/c/{cid_str}/{mid}"
+                text += f"\n- {ch}: رابط"
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="control_panel")]]
+        await edit_caption_and_buttons(query, text, InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data == "start_roulette":
+        channels = await db.get_user_channels(user_id)
+        if not channels:
+            await query.answer("ليس لديك قنوات مضافة بعد!", show_alert=True)
+            return
+        keyboard = [[InlineKeyboardButton(ch, callback_data=f"begin_roulette_{ch}")] for ch in channels]
+        keyboard.append([InlineKeyboardButton("رجوع", callback_data="main_menu")])
+        await edit_caption_and_buttons(query, "اختر القناة لنشر الروليت:", InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data.startswith("begin_roulette_"):
+        channel = data.replace("begin_roulette_", "")
+        if await db.get_active_roulette_in_channel(channel):
+            await query.answer("يوجد روليت نشط بالفعل في هذه القناة", show_alert=True)
+            return
+        user_data["roulette_channel"] = channel
+        user_data["state"] = "awaiting_description"
+        keyboard = [[InlineKeyboardButton("الغاء", callback_data="start_roulette")]]
+        await edit_caption_and_buttons(query, f"ارسل وصف المسابقة لـ {channel}:", InlineKeyboardMarkup(keyboard))
+        return
+
+    else:
+        await query.answer("خيار غير معروف", show_alert=True)
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # معالج الرسائل (مختصر)
-    await update.message.reply_text(wrap_text("الرجاء استخدام الأزرار للتحكم"), parse_mode="HTML")
+    user_data = context.user_data
+    user_id = update.message.from_user.id
+    text = update.message.text.strip()
+    state = user_data.get("state")
 
+    if state == "awaiting_description":
+        channel = user_data.get("roulette_channel")
+        if not channel:
+            await update.message.reply_text(wrap_text("حدث خطأ، يرجى المحاولة مرة أخرى"), parse_mode="HTML")
+            user_data.pop("state", None)
+            user_data.pop("roulette_channel", None)
+            return
 
-async def create_roulette_post(owner_id: int, channel: str, description: str, condition_channels: List[str], context, update):
-    if await db.get_active_roulette_in_channel(channel):
-        await update.message.reply_text(wrap_text(f"يوجد روليت نشط مسبقاً في {channel}"), parse_mode="HTML")
+        description = text
+        condition_channels = await db.get_condition_channels()
+        
+        cond_text = "\n\nاشترك في القنوات التالية للمشاركة:\n" + "\n".join(condition_channels) if condition_channels else ""
+        full_text = f"{description}{cond_text}"
+        
+        try:
+            chat_id = f"@{channel.replace('@', '')}"
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=wrap_text(full_text),
+                parse_mode="HTML",
+            )
+            
+            roulette_id = await db.create_roulette_get_id(user_id, channel, msg.chat_id, msg.message_id, description)
+            await update_roulette_message(roulette_id, context)
+            await update.message.reply_text(wrap_text(f"تم نشر الروليت بنجاح في {channel}"), parse_mode="HTML")
+            
+        except Exception as e:
+            await update.message.reply_text(wrap_text(f"فشل النشر: {str(e)}"), parse_mode="HTML")
+        
+        user_data.pop("state", None)
+        user_data.pop("roulette_channel", None)
         return
 
-    cond_lines = "\n".join([f"<blockquote expandable>{ch}</blockquote>" for ch in condition_channels]) if condition_channels else ""
-    full_text = f"{description}\n\n{cond_lines}" if cond_lines else description
-
-    try:
-        msg = await context.bot.send_message(
-            chat_id=f"@{channel.replace('@', '')}",
-            text=wrap_text(full_text),
-            parse_mode="HTML",
-        )
-    except TelegramError as e:
-        await update.message.reply_text(wrap_text(f"فشل النشر في {channel}: {e}"), parse_mode="HTML")
-        return
-
-    roulette_id = await db.create_roulette_get_id(owner_id, channel, msg.chat_id, msg.message_id, description)
-    await update_roulette_message(roulette_id, context)
-    await update.message.reply_text(wrap_text(f"تم نشر الروليت في {channel}"), parse_mode="HTML")
-    await send_notification(context, owner_id, f"تم نشر الروليت في {channel} بنجاح.")
+    else:
+        await update.message.reply_text(wrap_text("مرحبا! استخدم الازرار للتحكم في البوت"), parse_mode="HTML")
 
 
 # ---------- ويب هوك Flask ----------
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """استقبال التحديثات من تليجرام"""
     try:
         update_data = request.get_json()
         if not update_data:
             return jsonify({"status": "error", "message": "No data"}), 400
         
-        # معالجة التحديث بشكل متزامن
+        # معالجة التحديث بشكل غير متزامن
         asyncio.run_coroutine_threadsafe(
             process_update(update_data),
             loop
@@ -639,7 +797,6 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 async def process_update(update_data):
-    """معالجة التحديث بشكل غير متزامن"""
     try:
         update = Update.de_json(update_data, bot_app.bot)
         await bot_app.process_update(update)
@@ -648,7 +805,7 @@ async def process_update(update_data):
 
 @flask_app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "alive", "bot": "running"}), 200
+    return jsonify({"status": "alive", "bot": "running", "timestamp": time.time()}), 200
 
 @flask_app.route('/ping', methods=['POST'])
 def ping():
@@ -669,7 +826,7 @@ bot_app = None
 loop = None
 
 async def setup_webhook(application: Application):
-    """إعداد الويب هوك"""
+    """اعداد الويب هوك"""
     await application.bot.delete_webhook()
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await application.bot.set_webhook(webhook_url)
@@ -683,11 +840,11 @@ async def post_init(application: Application):
     await db.connect()
     await setup_webhook(application)
     
-    # بدء خدمة الإبقاء على النشاط
+    # بدء خدمة الابقاء على النشاط
     keep_alive = KeepAliveService(WEBHOOK_URL, interval=300)
     keep_alive.start()
     
-    logger.info("تم تهيئة البوت وبدء خدمة الإبقاء على النشاط")
+    logger.info("تم تهيئة البوت وبدء خدمة الابقاء على النشاط")
 
 
 async def post_shutdown(application: Application):
@@ -695,31 +852,26 @@ async def post_shutdown(application: Application):
 
 
 def run_flask():
-    """تشغيل خادم Flask"""
     flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 
 def main():
     global bot_app
     
-    # إنشاء تطبيق البوت
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     bot_app = application
     
-    # إضافة المعالجات
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # تشغيل Flask في خيط منفصل
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
     logger.info(f"تم بدء البوت على المنفذ {PORT}")
     logger.info(f"ويب هوك على: {WEBHOOK_URL}")
     
-    # تشغيل البوت مع polling (كحل احتياطي)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
