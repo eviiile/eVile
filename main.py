@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-بوت روليت سياف - الإصدار المتكامل مع لوحة تحكم الأدمن ونظام الإشعارات (زر مباشر)
+بوت روليت سياف - الإصدار المتكامل مع ويب هوك ونظام الإبقاء على النشاط
 يستخدم: python-telegram-bot v20+ (async) + PostgreSQL (asyncpg)
 """
 
 import asyncio
 import logging
 import random
+import requests
+import threading
+import time
 from typing import List, Tuple, Dict, Optional
+from flask import Flask, request, jsonify
 
 import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -26,6 +30,8 @@ from telegram.error import TelegramError
 BOT_TOKEN = "8602564332:AAEU3Juyopfg4l1PXXqe5kwKVqABqZYrO5o"
 ADMIN_ID = 6689435577
 DATABASE_URL = "postgresql://roleete_user:Zezw05RI12oaJ3EPYiiTz3lTwefNyqJu@dpg-d831vrbtqb8s73bja8l0-a.oregon-postgres.render.com/roleete"
+WEBHOOK_URL = "https://evile-roleet.onrender.com"
+PORT = int(os.environ.get("PORT", 8080))
 
 MAIN_PHOTO_URL = "https://kommodo.ai/i/T6qXdlO5OHv0yBb3v5Pw"
 TARGET_BOT_USERNAME = "VD67_BOT"
@@ -39,10 +45,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# إنشاء تطبيق Flask للويب هوك
+flask_app = Flask(__name__)
 
 def wrap_text(text: str) -> str:
     """تغليف النص بـ blockquote expandable"""
     return f"<blockquote expandable>{text}</blockquote>"
+
+
+# ---------- نظام الإبقاء على النشاط ----------
+class KeepAliveService:
+    """خدمة لإرسال طلبات دورية للحفاظ على نشاط البوت"""
+    
+    def __init__(self, url: str, interval: int = 300):
+        self.url = url
+        self.interval = interval  # بالثواني
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        """بدء خدمة الإبقاء على النشاط"""
+        if self.running:
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        logger.info(f"تم بدء خدمة الإبقاء على النشاط، كل {self.interval} ثانية")
+    
+    def stop(self):
+        """إيقاف خدمة الإبقاء على النشاط"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        logger.info("تم إيقاف خدمة الإبقاء على النشاط")
+    
+    def _run(self):
+        """تشغيل الحلقة اللانهائية لإرسال الطلبات"""
+        while self.running:
+            try:
+                # إرسال طلب GET للويب هوك
+                response = requests.get(f"{self.url}/health", timeout=10)
+                if response.status_code == 200:
+                    logger.debug("تم إرسال طلب الإبقاء على النشاط بنجاح")
+                else:
+                    logger.warning(f"فشل طلب الإبقاء على النشاط: {response.status_code}")
+                
+                # إرسال طلب POST للويب هوك
+                requests.post(
+                    f"{self.url}/ping",
+                    json={"timestamp": time.time(), "status": "alive"},
+                    timeout=10
+                )
+                
+            except Exception as e:
+                logger.error(f"خطأ في خدمة الإبقاء على النشاط: {e}")
+            
+            # الانتظار قبل إرسال الطلب التالي
+            time.sleep(self.interval)
+    
+    def ping_self(self):
+        """دالة ping للنفس"""
+        try:
+            response = requests.get(self.url, timeout=5)
+            return response.status_code == 200
+        except:
+            return False
 
 
 # ---------- قاعدة البيانات ----------
@@ -1036,22 +1103,105 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- ويب هوك Flask ----------
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    """استقبال التحديثات من تليجرام"""
+    try:
+        update_data = request.get_json()
+        if not update_data:
+            return jsonify({"status": "error", "message": "No data"}), 400
+        
+        # إنشاء كائن Update من البيانات
+        update = Update.de_json(update_data, bot_app.bot)
+        
+        # معالجة التحديث
+        await bot_app.process_update(update)
+        
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"خطأ في معالج الويب هوك: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@flask_app.route('/health', methods=['GET'])
+def health():
+    """نقطة نهاية للتحقق من صحة البوت"""
+    return jsonify({"status": "alive", "bot": "running"}), 200
+
+@flask_app.route('/ping', methods=['POST'])
+def ping():
+    """نقطة نهاية لاستقبال إشارات النشاط"""
+    return jsonify({"status": "pong"}), 200
+
+@flask_app.route('/', methods=['GET'])
+def index():
+    """الصفحة الرئيسية للويب هوك"""
+    return jsonify({
+        "bot": "Roulette Bot",
+        "status": "running",
+        "webhook_url": WEBHOOK_URL,
+        "version": "2.0.0"
+    }), 200
+
+
+# ---------- إعداد البوت ----------
+bot_app = None
+
+async def setup_webhook(application: Application):
+    """إعداد الويب هوك"""
+    await application.bot.delete_webhook()
+    
+    # تعيين الويب هوك
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    logger.info(f"تم تعيين الويب هوك على: {webhook_url}")
+
+
 async def post_init(application: Application):
+    global bot_app
+    bot_app = application
     await db.connect()
+    await setup_webhook(application)
+    
+    # بدء خدمة الإبقاء على النشاط
+    keep_alive = KeepAliveService(WEBHOOK_URL, interval=300)  # كل 5 دقائق
+    keep_alive.start()
+    
+    logger.info("تم تهيئة البوت وبدء خدمة الإبقاء على النشاط")
 
 async def post_shutdown(application: Application):
     await db.close()
 
 
+def run_flask():
+    """تشغيل خادم Flask"""
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+
+
 def main():
+    global bot_app
+    
+    # إنشاء تطبيق البوت
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    bot_app = application
+    
+    # إضافة المعالجات
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    logger.info("البوت يعمل...")
-    application.run_polling()
+    
+    # تشغيل Flask في خيط منفصل
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    logger.info(f"تم بدء البوت على المنفذ {PORT}")
+    logger.info(f"ويب هوك على: {WEBHOOK_URL}")
+    
+    # تشغيل البوت (بدون polling لأننا نستخدم webhook)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
+    import os
     main()
