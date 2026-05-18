@@ -29,7 +29,7 @@ from flask import Flask, request, jsonify
 import signal
 
 # ---------- الإعدادات ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602564332:AAEU3Juyopfg4l1PXXqe5kwKVqABqZYrO5o")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8602564332:AAHhYmFxyQN2PO2ec748mk_oFcl4e_8XMZw")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6689435577"))
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://roleete_user:Zezw05RI12oaJ3EPYiiTz3lTwefNyqJu@dpg-d831vrbtqb8s73bja8l0-a.oregon-postgres.render.com/roleete")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://evile-roleet.onrender.com")
