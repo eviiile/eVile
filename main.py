@@ -1051,16 +1051,26 @@ def home():
     })
 
 @flask_app.route('/webhook', methods=['POST'])
-async def webhook():
-    """استقبال التحديثات من تيليجرام عبر ويب هوك"""
+def webhook():
+    """استقبال التحديثات من تيليجرام عبر ويب هوك (متزامن)"""
     try:
         data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
+        # الحصول على حلقة الأحداث الجارية
+        loop = asyncio.get_event_loop()
+        # إنشاء مهمة لمعالجة التحديث بشكل غير متزامن
+        asyncio.run_coroutine_threadsafe(process_update(data), loop)
         return "OK", 200
     except Exception as e:
         logger.error(f"خطأ في معالجة التحديث: {e}")
         return "Error", 500
+
+async def process_update(data):
+    """معالجة التحديث بشكل غير متزامن"""
+    try:
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+    except Exception as e:
+        logger.error(f"خطأ أثناء معالجة التحديث: {e}")
 
 @flask_app.route('/ping')
 def ping():
@@ -1104,7 +1114,7 @@ def run_flask():
 if __name__ == "__main__":
     import threading
     
-    # الاتصال بقاعدة البيانات أولاً (عملية متزامنة ولكنها غير حاصرة)
+    # الاتصال بقاعدة البيانات أولاً
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(db.connect())
