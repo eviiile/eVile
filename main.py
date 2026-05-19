@@ -1067,38 +1067,62 @@ def ping():
     return "pong", 200
 
 
-# ---------- التشغيل الرئيسي ----------
-async def main():
-    """تهيئة وتشغيل البوت"""
-    try:
-        # الاتصال بقاعدة البيانات
-        await db.connect()
-        
-        # تهيئة البوت
-        await application.initialize()
-        await application.start()
-        
-        # إضافة المعالجات
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("admin", admin_command))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-        
-        # تعيين الويب هوك
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        logger.info(f"تم تعيين الويب هوك إلى: {WEBHOOK_URL}/webhook")
-        
-        logger.info("البوت جاهز للعمل...")
-        
-    except Exception as e:
-        logger.error(f"فشل في تشغيل البوت: {e}")
-        sys.exit(1)
+# ---------- التشغيل الرئيسي (تم تعديله بالكامل لإصلاح الأخطاء) ----------
+application = None  # سيتم تعيينه لاحقًا
 
+async def initialize_bot():
+    """تهيئة البوت وتعيين الويب هوك بشكل غير متزامن"""
+    global application
+    # بناء التطبيق
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة المعالجات
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    # تهيئة وتشغيل التطبيق
+    await application.initialize()
+    await application.start()
+    
+    # تعيين الويب هوك
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    logger.info(f"تم تعيين الويب هوك إلى: {WEBHOOK_URL}/webhook")
+    logger.info("البوت جاهز للعمل...")
+
+async def shutdown_bot():
+    """إيقاف البوت بشكل آمن عند الخروج"""
+    if application:
+        await application.stop()
+        await application.shutdown()
+
+def run_flask():
+    """تشغيل خادم Flask في خيط منفصل"""
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
 
 if __name__ == "__main__":
-    # تشغيل البوت في الخلفية
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())
+    import threading
     
-    # تشغيل Flask كخادم رئيسي
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+    # الاتصال بقاعدة البيانات أولاً (عملية متزامنة ولكنها غير حاصرة)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(db.connect())
+    
+    # تشغيل تهيئة البوت غير المتزامن
+    loop.run_until_complete(initialize_bot())
+    
+    # تشغيل Flask في خيط منفصل
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # تشغيل الحلقة الرئيسية للاستماع للأحداث القادمة (مثل webhook)
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        logger.info("إيقاف التشغيل ...")
+    finally:
+        # إيقاف البوت بشكل آمن
+        loop.run_until_complete(shutdown_bot())
+        loop.run_until_complete(db.close())
+        loop.close()
